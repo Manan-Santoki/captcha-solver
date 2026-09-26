@@ -1,0 +1,21 @@
+services:
+  captcha-solver:
+    build: .
+    restart: unless-stopped
+    shm_size: "1gb"
+    environment:
+      PORT: "8877"
+      BROWSER_HEADLESS: "0"
+      SOLVER_TOKEN: ${SOLVER_TOKEN:?set SOLVER_TOKEN}
+      SOLVER_PUBLIC_URL: ${SOLVER_PUBLIC_URL:-http://127.0.0.1:8877}
+      MISTRAL_API_KEYS: ${MISTRAL_API_KEYS:-}
+      ARKOSE_MODELS_URL: ${ARKOSE_MODELS_URL:-}
+      TURNSTILE_GEOIP: ${TURNSTILE_GEOIP:-}
+      RECAPTCHA_GEOIP: ${RECAPTCHA_GEOIP:-}
+    volumes:
+      - arkose-models:/app/arkose/models
+    expose:
+      - "8877"
+
+volumes:
+  arkose-models:

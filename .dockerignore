@@ -1,0 +1,8 @@
+.git
+.venv
+**/__pycache__
+**/*.pyc
+.env
+.solver-token.env
+arkose/models/
+tests/

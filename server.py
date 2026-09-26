@@ -1,5 +1,6 @@
 """Captcha solver HTTP sidecar — unified endpoints."""
 import asyncio
+import hmac
 import ipaddress
 import itertools
 import json
@@ -12,7 +13,8 @@ from collections import deque
 from typing import Any, Optional
 from urllib.parse import urlparse
 
-from fastapi import Body, Depends, FastAPI, HTTPException, Query
+from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer
 from pydantic import BaseModel, Field
 
@@ -69,6 +71,24 @@ app = FastAPI(
 # the endpoint proceeds — real enforcement stays at the Caddy layer (public domain only).
 _bearer = HTTPBearer(auto_error=False, description="Bearer token (required on the public "
                      "domain; enforced by the reverse proxy). Ignored for local calls.")
+# Optional in-process enforcement for deployments without an auth proxy (e.g. Docker/Traefik):
+# when SOLVER_TOKEN is set, every path except /health and the docs requires
+# `Authorization: Bearer <SOLVER_TOKEN>`. Unset = previous behaviour (no in-process auth).
+_SOLVER_TOKEN = os.getenv("SOLVER_TOKEN", "")
+_PUBLIC_PATHS = ("/health", "/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json")
+
+
+@app.middleware("http")
+async def _require_token(request: Request, call_next):
+    if _SOLVER_TOKEN and request.url.path not in _PUBLIC_PATHS:
+        auth = request.headers.get("authorization", "")
+        scheme, _, token = auth.partition(" ")
+        if scheme.lower() != "bearer" or not hmac.compare_digest(token.strip(), _SOLVER_TOKEN):
+            return JSONResponse({"detail": "Unauthorized"}, status_code=401,
+                                headers={"WWW-Authenticate": "Bearer"})
+    return await call_next(request)
+
+
 SUPPORTED = ["turnstile", "recaptcha", "hcaptcha", "cloudflare", "awswaf", "botguard", "datadome", "perimeterx", "akamai", "aliyun", "arkose"]
 # Page-level solvers that harvest a cookie/token from the live page (no sitekey needed).
 _PAGE_LEVEL = ("cloudflare", "awswaf", "botguard", "datadome", "perimeterx", "akamai")
