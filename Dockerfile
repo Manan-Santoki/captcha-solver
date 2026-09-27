@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install -r requirements.txt "cloakbrowser[geoip]" \
+RUN pip install -r requirements.txt "cloakbrowser[geoip]==0.4.12" \
     # Chromium's shared-library deps, then bake the CloakBrowser binary into the image.
     && playwright install-deps chromium \
     && rm -rf /var/lib/apt/lists/* \
