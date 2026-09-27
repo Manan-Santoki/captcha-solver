@@ -19,15 +19,14 @@ heavily penalised surface.
 """
 import asyncio
 import logging
-import os
 import time
 from pathlib import Path
 
 import cloakbrowser
 
 from common.browser import browser_kwargs, run_pre_actions, run_post_fetch, route_glob
-from common.mistral import KeyPool
-from .image_solve import solve_image_challenge
+from common.vision import LocalFirstClassifier, openrouter_configured, vision_pool
+from .image_solve import has_image_challenge, solve_image_challenge
 
 log = logging.getLogger(__name__)
 
@@ -38,15 +37,18 @@ _VALID_CLASSIFIERS = frozenset({"yolo", "mistral", "hybrid", "auto"})
 
 
 def _build_keypool():
-    model = os.getenv("RECAPTCHA_MISTRAL_MODEL", "mistral-medium-latest")
-    # vary the start offset by pid so concurrent procs don't hammer key #0
-    return KeyPool(str(_KEYFILE), model=model, start_index=os.getpid())
+    return vision_pool("RECAPTCHA", _KEYFILE)
 
 
 def _get_keypool(classifier: str = None):
     """Lazy tile classifier for the image challenge.
 
-    `classifier` (optional body param on /solve):
+    With OPENROUTER_API_KEY set, auto/hybrid try local ONNX for one image
+    verification attempt, then real-time OpenRouter vision. Without it, keep
+    the original provider selection below. yolo never calls a remote provider;
+    mistral uses only the configured vision provider.
+
+    Legacy `classifier` (optional body param on /solve):
       - None / "auto"  — ONNX hybrid if model present, else pure Mistral (default)
       - "hybrid"       — ONNX-first + Mistral fallback for unknown targets
       - "yolo"         — pure local ONNX, no Mistral (fails if model missing)
@@ -62,8 +64,24 @@ def _get_keypool(classifier: str = None):
             f"classifier must be one of {sorted(_VALID_CLASSIFIERS)}, got {classifier!r}")
 
     from .onnx_classifier import get_classifier, HybridClassifier
-    onnx = get_classifier()
 
+    if openrouter_configured():
+        if mode == "mistral":
+            return _build_keypool()
+        if mode == "yolo":
+            onnx = get_classifier()
+            if onnx is None:
+                raise RuntimeError("classifier=yolo but ONNX model missing")
+            return onnx
+        try:
+            onnx = get_classifier()
+        except Exception:
+            log.warning("Local reCAPTCHA model could not load; using OpenRouter")
+            onnx = None
+        # Never cache attempt state: each /solve gets its own local-first decision.
+        return LocalFirstClassifier(onnx, _build_keypool())
+
+    onnx = get_classifier()
     if mode == "auto":
         mode = "hybrid" if onnx is not None else "mistral"
 
@@ -90,6 +108,12 @@ def _get_keypool(classifier: str = None):
 
     _keypool_cache[mode] = pool
     return pool
+
+
+async def _solve_image_attempt(page, pool):
+    classifier = pool.next_attempt() if isinstance(pool, LocalFirstClassifier) else pool
+    log.info("reCAPTCHA image attempt classifier: %s", getattr(classifier, "provider", type(classifier).__name__))
+    return await solve_image_challenge(page, classifier)
 
 _TEMPLATE_PATH = Path(__file__).parent / "template.html"
 _HTML_TEMPLATE = _TEMPLATE_PATH.read_text()
@@ -478,14 +502,12 @@ async def solve_recaptcha_invisible_realpage(
                     # Retry up to max_image_attempts: a failed verify often loads a
                     # fresh challenge, and a one-shot flag would burn the whole timeout.
                     if (image_attempts < max_image_attempts
-                            and await _find_frame(page, "/bframe")
-                            and await page.frame_locator(_BFRAME_IFRAME).locator(
-                                "table").count() > 0):
+                            and await has_image_challenge(page)):
                         image_attempts += 1
                         log.info("invisible realpage: bframe image challenge detected "
                                  "(attempt %d/%d)", image_attempts, max_image_attempts)
                         try:
-                            await solve_image_challenge(page, keypool)
+                            await _solve_image_attempt(page, keypool)
                         except Exception as e:
                             log.warning("invisible image-solve: %s",
                                         str(e).splitlines()[0])
@@ -589,7 +611,9 @@ async def solve_recaptcha_v2(sitekey: str, url: str,
 
                 for attempt in range(1, max_attempts + 1):
                     log.info("v2 attempt %d/%d", attempt, max_attempts)
-                    for _ctry in range(3):
+                    # A rejected local answer leaves the image challenge open. Do not click
+                    # its checkbox again (which can hide the grid before the remote fallback).
+                    for _ctry in range(0 if await has_image_challenge(page) else 3):
                         try:
                             await page.frame_locator(_ANCHOR_IFRAME).locator(
                                 "#recaptcha-anchor").click(timeout=8000)
@@ -610,16 +634,14 @@ async def solve_recaptcha_v2(sitekey: str, url: str,
                                 return {"token": token, "attempts": attempt,
                                         "elapsed": round(time.monotonic() - t0, 1),
                                         "method": "checkbox-no-challenge"}
-                        if await _find_frame(page, "/bframe") and \
-                                await page.frame_locator(_BFRAME_IFRAME).locator(
-                                    "table").count() > 0:
+                        if await has_image_challenge(page):
                             challenge = True
                             break
 
                     # Image-solve (audio is IP-blocked). Tile classifier: YOLO/Mistral/hybrid.
                     if challenge:
                         try:
-                            await solve_image_challenge(page, keypool)
+                            await _solve_image_attempt(page, keypool)
                         except Exception as e:
                             log.warning("image-solve: %s", str(e).splitlines()[0])
                         token = await _get_token(page)
@@ -648,9 +670,8 @@ async def solve_recaptcha_v2_realpage(url: str, sitekey: str = None,
     cross-origin iframe, harvests the token, and optionally runs post_fetch API calls
     from the SAME browser session. Mirrors turnstile.solve_turnstile_realpage.
 
-    If Google escalates to an image bframe, solve the grid once via the tile classifier
-    (`classifier`: yolo|mistral|hybrid|auto — see `_get_keypool`). The `image_attempted`
-    flag prevents re-entering image-solve on the same challenge.
+    If Google escalates to an image bframe, retry within the deadline up to four
+    image attempts (`classifier`: yolo|mistral|hybrid|auto — see `_get_keypool`).
 
     Use __TOKEN__ in post_fetch bodies to inject the solved token.
     """
@@ -695,14 +716,12 @@ async def solve_recaptcha_v2_realpage(url: str, sitekey: str = None,
                     # Image bframe opened after checkbox click — solve the grid.
                     # Retry on fresh challenges after a failed verify.
                     if (image_attempts < max_image_attempts
-                            and await _find_frame(page, "/bframe")
-                            and await page.frame_locator(_BFRAME_IFRAME).locator(
-                                "table").count() > 0):
+                            and await has_image_challenge(page)):
                         image_attempts += 1
                         log.info("v2 realpage: bframe image challenge detected "
                                  "(attempt %d/%d)", image_attempts, max_image_attempts)
                         try:
-                            await solve_image_challenge(page, keypool)
+                            await _solve_image_attempt(page, keypool)
                         except Exception as e:
                             log.warning("v2 realpage image-solve: %s",
                                         str(e).splitlines()[0])

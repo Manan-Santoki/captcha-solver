@@ -148,9 +148,25 @@ curl -X POST $API/solve "${H[@]}" -d '{
 ```
 - If Google shows an image grid, tiles are classified by `classifier`:
   `yolo` (local ONNX only) · `mistral` (vision API only) · `hybrid`/`auto` (ONNX first, Mistral fallback).
-- Image grids need **several Mistral keys** (`MISTRAL_API_KEYS`, comma-separated) — one key gets HTTP 429.
+- With `OPENROUTER_API_KEY` configured, `auto`/`hybrid` try local ONNX for one image
+  verification attempt, then use `mistralai/mistral-medium-3-5` through OpenRouter.
+  One remote request classifies the whole grid; dynamic replacements require
+  additional rounds. A missing local model goes straight to OpenRouter.
+- Set `OPENROUTER_MODEL` to override the real-time model and `OPENROUTER_TIMEOUT_S`
+  to bound each request (default 25 seconds). Batch models are not supported for
+  live image challenges. The overall `timeout_s` and attempt limits still apply.
+- Without an OpenRouter key, the original direct Mistral key pool is used. Its
+  per-tile requests may hit provider rate limits; a single key is not by itself
+  evidence of the cause of a failed solve.
 - A clean residential `proxy` reduces how often Google shows images at all.
 - Submit `token` as `g-recaptcha-response`. Valid ~2 min.
+
+The OpenRouter key is a **solver service environment variable**, separate from
+`SOLVER_TOKEN` (which authenticates callers). Save it in Dokploy's solver Compose
+Environment, then deploy the updated service. Never put it in a request body or Git.
+hCaptcha uses the same OpenRouter provider when configured; it has no local ONNX
+stage. Automatic checkbox success makes no vision request. A real CAPTCHA test
+that clears that way does not validate the image solver.
 
 ### reCAPTCHA v3 (score) → `token`
 

@@ -4,6 +4,11 @@ Local hCaptcha solver via CloakBrowser, following the same patterns as the Turns
 and reCAPTCHA solvers (route-intercept, headed-under-Xvfb, same-session post_fetch).
 hCaptcha API is compatible with reCAPTCHA (`hcaptcha.execute()` ≈ `grecaptcha.execute()`).
 
+With `OPENROUTER_API_KEY` configured, image and numbered-canvas requests use
+OpenRouter's real-time `mistralai/mistral-medium-3-5` model. hCaptcha has no local
+ONNX stage, so it calls the remote provider when a challenge appears. Without this
+key, it retains the direct Mistral key pool. Browser-only success makes no model call.
+
 ## Solving modes
 
 ### 1. Checkbox — route-intercept (`/solve` with `type: "hcaptcha"`)

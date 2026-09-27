@@ -13,6 +13,14 @@ same-session post_fetch).
 
 ## Solving modes
 
+When `OPENROUTER_API_KEY` is set, `classifier: auto`/`hybrid` try local ONNX for
+one image verification attempt, then switch to real-time
+`mistralai/mistral-medium-3-5` through OpenRouter if no token appears. Each remote
+request covers a whole grid, including replacement rounds for dynamic challenges.
+`yolo` stays local only; `mistral` uses the remote provider immediately. Without an
+OpenRouter key, the legacy direct Mistral/ONNX behavior below remains available.
+See the root README for deployment variables and timeout details.
+
 `version` selects the variant (`v3` | `invisible` | `v2`) and **defaults to `v2`**
 (checkbox) when omitted. `action` defaults to `submit` (only matters for score-based
 keys; override per your site's action name).

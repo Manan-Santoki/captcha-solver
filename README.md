@@ -126,8 +126,44 @@ browser.
 | `RECAPTCHA_GEOIP`       | unset   | `1` = same geo alignment for the reCAPTCHA browser |
 | `SOLVER_ALLOW_PRIVATE`  | unset   | `1` = allow `url`/`verify_url`/`post_fetch` targets on private/loopback/link-local hosts (SSRF guard off). Leave unset in prod. |
 | `SOLVER_PUBLIC_URL`     | (placeholder) | Public base URL shown in the OpenAPI docs (servers dropdown + contact). Set to your real domain at runtime. |
+| `OPENROUTER_API_KEY`    | unset | Enable OpenRouter vision fallback for reCAPTCHA and vision calls for hCaptcha. Set in deployment secrets, never in source. |
+| `OPENROUTER_MODEL`      | `mistralai/mistral-medium-3-5` | Real-time vision model. Batch model IDs are rejected. |
+| `OPENROUTER_TIMEOUT_S`  | `25` | Timeout per OpenRouter request, between 1 and 40 seconds. The overall solve deadline still applies. |
 
 Proxy is **per-request only** (`body.proxy`). No `*_PROXY` env vars.
+
+### OpenRouter fallback
+
+With `OPENROUTER_API_KEY` configured, reCAPTCHA `classifier: auto` (the default)
+and `hybrid` give the local ONNX model **one image verification attempt**. If no
+token appears, later attempts use OpenRouter Mistral. A dynamic grid can contain
+several replacement rounds within that one verification attempt. If the local
+model is absent, OpenRouter is used immediately. `yolo` remains local only;
+`mistral` goes directly to the configured remote provider.
+
+OpenRouter receives the grid image and challenge target in **one real-time request
+per grid/round**, instead of nine or sixteen tile requests. This is grouped image
+classification, not the asynchronous Batch API. Mistral batch requests do not
+support images and are unsuitable for interactive challenges. See the
+[OpenRouter Batch API documentation](https://openrouter.ai/docs/batch-quickstart).
+
+hCaptcha already sends a numbered canvas in one request; it uses OpenRouter when
+configured. It has no local ONNX classification stage. Other CAPTCHA providers
+keep their existing configuration. Without an OpenRouter key, the legacy direct
+Mistral key pool remains in use (`MISTRAL_API_KEYS`, optional
+`RECAPTCHA_MISTRAL_MODEL`/`HCAPTCHA_MISTRAL_MODEL`).
+
+HTTP failures, invalid selections, and screenshot failures remain failures;
+they are never interpreted as "no matching tiles." Retries stay bounded by the
+existing attempt limits and `/solve` deadline. A canceled solve may leave one
+already-started HTTP request running until its configured request timeout.
+Returning a token is not proof that a target site accepted it: the caller must
+submit the form and verify the result. Dispatch keeps its human handoff fallback.
+
+For Dokploy, save these three OpenRouter variables in the solver Compose service's
+Environment and deploy the updated `dokploy` branch. Keep the existing solver token
+and other variables. No OpenRouter key belongs in Dispatch, its browser image,
+the local agent, or the extension.
 
 ### SSRF guard
 
@@ -165,10 +201,10 @@ when you deliberately need to hit an internal target.
   "enterprise": false,
   "real_page": false,            // v2/v3/invisible: navigate live origin (needed for Enterprise invisible that 403s enterprise.js?render=<sitekey>)
   "classifier": "auto",          // tile classifier: auto|hybrid|yolo|mistral
-                                 //   auto = ONNX hybrid if model present, else Mistral
-                                 //   hybrid = ONNX-first + Mistral for unknown targets
+                                 //   auto/hybrid = one local attempt, then OpenRouter if configured
+                                 //   without OpenRouter: ONNX hybrid, Mistral for unknown targets
                                  //   yolo = pure local ONNX (fails if model missing)
-                                 //   mistral = pure Mistral vision (skip ONNX)
+                                 //   mistral = configured remote vision provider (skip ONNX)
                                  //   used by v2 checkbox + invisible real_page bframe
                                  //   ignored for pure score-based v3
 

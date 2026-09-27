@@ -13,6 +13,7 @@ build/
 
 # Credentials
 .env
+.env.*
 .solver-token.env
 apikey.txt
 **/apikey.txt
