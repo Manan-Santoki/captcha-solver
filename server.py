@@ -229,8 +229,9 @@ class SolveRequest(BaseModel):
         None,
         description="reCAPTCHA tile classifier for image challenges — "
         "'yolo' (local ONNX, no fallback), 'mistral' (vision API only), "
-        "'hybrid' (ONNX-first + Mistral for unknown targets), "
-        "'auto' or omit (hybrid if ONNX model present, else mistral). "
+        "'hybrid' or 'auto' (with OPENROUTER_API_KEY: one local image-verification attempt, "
+        "then OpenRouter whole-grid vision if no token; OpenRouter directly if ONNX is absent). "
+        "Without OpenRouter, auto/hybrid retain ONNX plus direct Mistral for unknown targets. "
         "Used by v2 checkbox and by invisible real_page when a bframe "
         "image challenge appears. Ignored for pure score-based v3.")
 

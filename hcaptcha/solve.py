@@ -16,13 +16,12 @@ Three modes:
 """
 import asyncio
 import logging
-import os
 import time
 from pathlib import Path
 
 import cloakbrowser
 
-from common.mistral import KeyPool
+from common.vision import vision_pool
 from common.browser import browser_kwargs, run_pre_actions, run_post_fetch, route_glob
 
 log = logging.getLogger(__name__)
@@ -38,8 +37,7 @@ def _get_keypool():
     """Lazy, shared KeyPool for hCaptcha image solving."""
     global _keypool
     if _keypool is None:
-        model = os.getenv("HCAPTCHA_MISTRAL_MODEL", "mistral-medium-latest")
-        _keypool = KeyPool(str(_KEYFILE), model=model, start_index=os.getpid())
+        _keypool = vision_pool("HCAPTCHA", _KEYFILE)
     return _keypool
 
 

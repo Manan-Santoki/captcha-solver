@@ -1,8 +1,7 @@
 """Solve the reCAPTCHA v2 IMAGE challenge with a vision model.
 
-The audio fallback is IP-blocked, but the image grid opens normally. We screenshot
-the grid, slice it into tiles, ask the Mistral key-pool yes/no per tile, click the
-positives, and submit. Handles the three layouts:
+We screenshot the grid, classify locally per tile or send the whole grid to the
+configured vision provider, click the positives, and submit. Handles the layouts:
 
   - 3x3 / 4x4 static : classify every tile once, click matches, verify.
   - dynamic (3x3)    : after a match is clicked the tile reloads a new image, so we
@@ -31,8 +30,16 @@ _CLASSIFY_CONCURRENCY = 4  # cap simultaneous Mistral calls per grid (avoid herd
 async def _find_bframe(page):
     for fr in page.frames:
         if _BFRAME in (fr.url or ""):
-            return fr
+            try:
+                if await fr.locator("table").is_visible():
+                    return fr
+            except Exception:
+                continue
     return None
+
+
+async def has_image_challenge(page):
+    return await _find_bframe(page) is not None
 
 
 async def _challenge_meta(bf) -> dict:
@@ -55,27 +62,34 @@ async def _challenge_meta(bf) -> dict:
 
 
 async def _classify_grid(bf, keypool, target: str, n: int) -> list:
-    """Screenshot the grid, slice into n*n tiles, classify each concurrently.
+    """Screenshot the grid; use one remote grid request or classify tiles locally.
 
     Returns the list of tile indices (row-major) classified as containing target.
     """
     table = await bf.query_selector("table")
     if not table:
-        return []
+        raise RuntimeError("CAPTCHA grid is no longer available")
+    await bf.page.bring_to_front()
     try:
         await asyncio.wait_for(table.wait_for_element_state("stable", timeout=3000),
                                timeout=5)
     except Exception:
         pass
     try:
-        grid_png = await asyncio.wait_for(table.screenshot(), timeout=10)
-    except asyncio.TimeoutError:
-        log.warning("grid screenshot timed out, retrying with frame screenshot")
+        grid_png = await asyncio.wait_for(table.screenshot(timeout=8000), timeout=10)
+    except Exception:
+        log.warning("grid screenshot failed, retrying with page crop")
         try:
-            grid_png = await asyncio.wait_for(bf.screenshot(), timeout=10)
+            box = await table.bounding_box()
+            if not box:
+                raise RuntimeError("CAPTCHA grid position is unavailable")
+            grid_png = await asyncio.wait_for(bf.page.screenshot(clip=box, timeout=8000), timeout=10)
         except Exception:
-            log.warning("frame screenshot also failed")
-            return []
+            raise RuntimeError("CAPTCHA grid capture failed") from None
+    if callable(getattr(keypool, "classify_grid", None)):
+        # One real-time vision request for the entire grid, including dynamic replacements.
+        b64 = base64.b64encode(grid_png).decode()
+        return await asyncio.to_thread(keypool.classify_grid, b64, target, n)
     img = Image.open(io.BytesIO(grid_png)).convert("RGB")
     W, H = img.size
     tw, th = W // n, H // n
